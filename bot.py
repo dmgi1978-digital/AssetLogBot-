@@ -8,12 +8,27 @@ import httpx
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8443))
 
+# Маппинг тикеров → CoinGecko ID
+COINGECKO_IDS = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "TON": "the-open-network",
+    "BNB": "binancecoin",
+    "SOL": "solana",
+    "XRP": "ripple",
+    "ADA": "cardano",
+    "DOGE": "dogecoin",
+    "DOT": "polkadot",
+    "MATIC": "polygon",
+}
+
 logging.basicConfig(level=logging.INFO)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Hi! I’m AssetLog — your total capital OS.\n\n"
         "Use /add to log an asset.\n"
+        "Supported: BTC, ETH, TON, BNB, SOL, XRP, ADA, DOGE, DOT, MATIC\n"
         "Example: /add BTC 0.5 2024-06-15"
     )
 
@@ -28,37 +43,47 @@ async def add_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buy_date_str = context.args[2]
         buy_date = datetime.strptime(buy_date_str, "%Y-%m-%d")
 
+        # Преобразуем тикер в ID CoinGecko
+        if symbol not in COINGECKO_IDS:
+            await update.message.reply_text(f"❌ Unsupported asset: {symbol}. Use: BTC, ETH, TON...")
+            return
+        cg_id = COINGECKO_IDS[symbol]
+
         price_usd = None
 
-        # Попытка 1: историческая цена
-        try:
-            date_fmt = f"{buy_date.day} {buy_date.strftime('%B')[:3]} {buy_date.year}"
-            url = f"https://api.coingecko.com/api/v3/coins/{symbol.lower()}/history?date={date_fmt}"
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if "market_data" in data and "current_price" in data["market_data"]:
-                        price_usd = data["market_data"]["current_price"]["usd"]
-        except Exception as e:
-            logging.warning(f"Historical price failed: {e}")
-
-        # Попытка 2: текущая цена (если историческая не удалась)
-        if price_usd is None:
+        # Попытка 1: историческая цена (только для прошлых дат)
+        today = date.today()
+        if buy_date.date() <= today:
             try:
-                url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
+                date_fmt = f"{buy_date.day} {buy_date.strftime('%B')[:3]} {buy_date.year}"
+                url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/history?date={date_fmt}"
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(url, timeout=10)
                     if resp.status_code == 200:
                         data = resp.json()
-                        if symbol.lower() in data:
-                            price_usd = data[symbol.lower()]["usd"]
+                        if "market_data" in data and "current_price" in data["market_data"]:
+                            price_usd = data["market_data"]["current_price"]["usd"]
             except Exception as e:
-                logging.error(f"Current price failed: {e}")
+                logging.warning(f"Historical price failed for {symbol}: {e}")
 
-        # Если ни одна попытка не удалась
+        # Попытка 2: текущая цена (если историческая не удалась или дата сегодня)
         if price_usd is None:
-            await update.message.reply_text(f"❌ Price not found for {symbol}. Try a different date or asset.")
+            try:
+                url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if cg_id in data and "usd" in data[cg_id]:
+                            price_usd = data[cg_id]["usd"]
+            except Exception as e:
+                logging.error(f"Current price failed for {symbol}: {e}")
+
+        if price_usd is None:
+            await update.message.reply_text(
+                f"❌ Price not found for {symbol}. This may be due to API limits.\n"
+                "Try again later or use a supported asset."
+            )
             return
 
         usd_value = amount * price_usd
@@ -74,9 +99,11 @@ async def add_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(msg)
 
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Use: /add BTC 0.5 2024-06-15")
     except Exception as e:
-        logging.error(f"Error in /add: {e}")
-        await update.message.reply_text("❌ Invalid input. Use: /add BTC 0.5 2024-06-15")
+        logging.error(f"Unexpected error: {e}")
+        await update.message.reply_text("❌ Something went wrong. Try again.")
 
 if __name__ == "__main__":
     app = Application.builder().token(BOT_TOKEN).build()
