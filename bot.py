@@ -8,7 +8,6 @@ import httpx
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 8443))
 
-# Маппинг тикеров → CoinGecko ID
 COINGECKO_IDS = {
     "BTC": "bitcoin",
     "ETH": "ethereum",
@@ -43,46 +42,46 @@ async def add_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buy_date_str = context.args[2]
         buy_date = datetime.strptime(buy_date_str, "%Y-%m-%d")
 
-        # Преобразуем тикер в ID CoinGecko
         if symbol not in COINGECKO_IDS:
             await update.message.reply_text(f"❌ Unsupported asset: {symbol}. Use: BTC, ETH, TON...")
             return
         cg_id = COINGECKO_IDS[symbol]
 
         price_usd = None
-
-        # Попытка 1: историческая цена (только для прошлых дат)
         today = date.today()
+
+        # Попытка 1: историческая цена через прокси
         if buy_date.date() <= today:
             try:
                 date_fmt = f"{buy_date.day} {buy_date.strftime('%B')[:3]} {buy_date.year}"
-                url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/history?date={date_fmt}"
+                raw_url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/history?date={date_fmt}"
+                proxy_url = f"https://api.allorigins.win/raw?url={raw_url}"
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, timeout=10)
+                    resp = await client.get(proxy_url, timeout=10)
                     if resp.status_code == 200:
                         data = resp.json()
                         if "market_data" in data and "current_price" in data["market_data"]:
                             price_usd = data["market_data"]["current_price"]["usd"]
             except Exception as e:
-                logging.warning(f"Historical price failed for {symbol}: {e}")
+                logging.warning(f"Historical price failed: {e}")
 
-        # Попытка 2: текущая цена (если историческая не удалась или дата сегодня)
+        # Попытка 2: текущая цена через прокси
         if price_usd is None:
             try:
-                url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
+                raw_url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
+                proxy_url = f"https://api.allorigins.win/raw?url={raw_url}"
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, timeout=10)
+                    resp = await client.get(proxy_url, timeout=10)
                     if resp.status_code == 200:
                         data = resp.json()
                         if cg_id in data and "usd" in data[cg_id]:
                             price_usd = data[cg_id]["usd"]
             except Exception as e:
-                logging.error(f"Current price failed for {symbol}: {e}")
+                logging.error(f"Current price failed: {e}")
 
         if price_usd is None:
             await update.message.reply_text(
-                f"❌ Price not found for {symbol}. This may be due to API limits.\n"
-                "Try again later or use a supported asset."
+                f"❌ Price not found for {symbol}. Try again later."
             )
             return
 
